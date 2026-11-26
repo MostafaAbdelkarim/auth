@@ -1,0 +1,41 @@
+name: CodeQL
+
+# Static security analysis (SAST) of the TypeScript in both apps. Findings appear under
+# Security → Code scanning, and on the pull request that introduces them. The weekly run catches
+# new queries and newly disclosed patterns in code that hasn't changed.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '23 4 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze TypeScript
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: github/codeql-action/init@915412ff23e8b7659517e607487dbeae018f2934 # v4
+        with:
+          languages: javascript-typescript
+          build-mode: none
+          queries: security-extended
+
+      - uses: github/codeql-action/analyze@915412ff23e8b7659517e607487dbeae018f2934 # v4
+        with:
+          category: /language:javascript-typescript
