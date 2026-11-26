@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # Build context: repository root (npm workspaces share one lockfile).
 
-FROM node:22-alpine AS build
+FROM node:26-alpine AS build
 WORKDIR /repo
 COPY package.json package-lock.json ./
 COPY apps/api/package.json apps/api/
