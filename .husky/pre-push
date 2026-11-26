@@ -1,0 +1,2 @@
+# Whole-repo type check: catches breakage in files that weren't staged. Tests run in CI and `make verify`.
+npm run typecheck
