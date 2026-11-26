@@ -1,0 +1,140 @@
+name: CD
+
+# Continuous delivery, trunk-based ("build once, deploy many"):
+#
+#   PR ──▶ CI (tests, scans) ──▶ merge to main ──▶ CI ──▶ CD (this file)
+#                                                         1. build each image ONCE, tagged with the commit SHA
+#                                                         2. scan that exact image (Trivy), publish it to GHCR
+#                                                            with build provenance + SBOM
+#                                                         3. deploy that image to the `dev` environment
+#   release.yml (manual, approved) ──▶ promotes the SAME image (same SHA, no rebuild) to `production`
+#
+# There is no long-lived `dev` branch on purpose: environments differ by which already-tested
+# image they run, not by which branch they were built from.
+#
+# ⚠️  DEPLOYMENT IS NOT WIRED TO ANY CLOUD PROVIDER YET.
+#     Publishing images to GHCR works as-is. The `deploy-dev` job below is a placeholder: it must
+#     be connected to a hosting target (and that target's credentials) before anything is deployed.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cd-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build, scan and publish ${{ matrix.app }} image
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        app: [api, web]
+    steps:
+      # Actions are pinned to commit SHAs (supply-chain safety); Dependabot keeps them current.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository }}-${{ matrix.app }}
+          # The full commit SHA is the immutable identity of the artifact; `main` just points at
+          # the newest build. Production gets its own tag only through release.yml.
+          tags: |
+            type=raw,value=${{ github.event.workflow_run.head_sha }}
+            type=raw,value=main
+
+      - name: Build image (local, for scanning)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: apps/${{ matrix.app }}/Dockerfile
+          load: true
+          tags: candidate-${{ matrix.app }}:scan
+          cache-from: type=gha,scope=${{ matrix.app }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.app }}
+
+      - name: Scan the image about to be published (Trivy)
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:0.76.2 image --scanners vuln --severity HIGH,CRITICAL \
+            --ignore-unfixed --exit-code 1 --no-progress "candidate-${APP}:scan"
+        env:
+          APP: ${{ matrix.app }}
+
+      # Same Dockerfile, same commit and same build cache as the scanned image: every layer is a
+      # cache hit, so what is pushed is what was scanned.
+      - name: Publish to GHCR with provenance and SBOM
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: apps/${{ matrix.app }}/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=${{ matrix.app }}
+
+  deploy-dev:
+    name: Deploy to dev
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Create the `dev` environment in Settings → Environments. Every main build lands here
+    # automatically (no approval): dev always runs the newest tested commit.
+    environment: dev
+    permissions:
+      contents: read
+      # Uncomment for keyless cloud authentication via OIDC (no long-lived cloud secrets):
+      # id-token: write
+    steps:
+      - name: Images to deploy
+        run: |
+          repo="${GITHUB_REPOSITORY,,}"
+          {
+            echo "### Deploying to dev"
+            echo "- API: \`ghcr.io/${repo}-api:${SHA}\`"
+            echo "- Web: \`ghcr.io/${repo}-web:${SHA}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          SHA: ${{ github.event.workflow_run.head_sha }}
+
+      # ───────────────────────────────────────────────────────────────────────────────────────
+      # ⚠️  PLACEHOLDER: wire this to your cloud provider before relying on it.
+      #
+      # This step does NOT deploy anything yet; there is no hosting target in this project.
+      # Replace it with the provider's deploy action, authenticating via OIDC where possible.
+      # Examples (deploy the SHA-tagged images published above):
+      #   AWS ECS:              aws-actions/configure-aws-credentials + aws ecs update-service …
+      #   Google Cloud Run:     google-github-actions/auth + gcloud run deploy --image …
+      #   Azure Container Apps: azure/login + az containerapp update --image …
+      #   Kubernetes:           kubectl set image deployment/api api=ghcr.io/<repo>-api:<sha> …
+      #   Single VM:            ssh + `docker compose pull && docker compose up -d`
+      # The target needs: MongoDB (managed or self-hosted), the env vars from .env.example /
+      # apps/api/.env.example as provider secrets, and TLS in front of the web container.
+      # ───────────────────────────────────────────────────────────────────────────────────────
+      - name: Deploy (placeholder, not wired to a cloud provider)
+        run: echo "::warning::Deployment to dev is not wired to a cloud provider yet. Images are published; see the comments in cd.yml."

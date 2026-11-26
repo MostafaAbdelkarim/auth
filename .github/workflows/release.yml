@@ -1,0 +1,112 @@
+name: Release to production
+
+# Promotes an image that already passed CI and CD (and has been running in dev) to production.
+# Nothing is rebuilt: the exact images published for that commit are re-tagged, so production
+# runs byte-for-byte what was tested ("build once, deploy many").
+#
+# Triggers:
+#   - Actions → "Release to production" → Run workflow, with the commit SHA to release, or
+#   - publishing a GitHub Release (the release's commit is promoted and also tagged with its version).
+#
+# Approval: create the `production` environment in Settings → Environments and add
+# "Required reviewers". This job then waits for a human approval before it runs.
+#
+# ⚠️  DEPLOYMENT IS NOT WIRED TO ANY CLOUD PROVIDER YET. Promotion (re-tagging the images in GHCR)
+#     works as-is; the `deploy-production` job is a placeholder that must be connected to a
+#     hosting target first (see the comments in that job and in cd.yml).
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Full commit SHA on main to release (its images must have been published by CD)
+        required: true
+        type: string
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-production
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    name: Promote images to production
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      sha: ${{ steps.target.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Inputs are passed through env, never interpolated into the script (injection-safe).
+      - name: Resolve and validate the commit to release
+        id: target
+        run: |
+          sha="${INPUT_SHA:-$RELEASE_SHA}"
+          if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Expected a full 40-character commit SHA, got '$sha'"; exit 1
+          fi
+          if ! git merge-base --is-ancestor "$sha" origin/main; then
+            echo "::error::$sha is not on main; only commits that went through main can be released"; exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+        env:
+          INPUT_SHA: ${{ inputs.sha }}
+          RELEASE_SHA: ${{ github.sha }}
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # `imagetools create` copies the existing manifest under new tags: no rebuild. It fails if
+      # the SHA-tagged image doesn't exist, i.e. if that commit never passed CD.
+      - name: Re-tag the tested images as production
+        run: |
+          repo="${GITHUB_REPOSITORY,,}"
+          for app in api web; do
+            source_image="ghcr.io/${repo}-${app}:${SHA}"
+            tags=(-t "ghcr.io/${repo}-${app}:production")
+            if [ -n "$RELEASE_TAG" ]; then tags+=(-t "ghcr.io/${repo}-${app}:${RELEASE_TAG}"); fi
+            docker buildx imagetools create "${tags[@]}" "$source_image"
+            echo "- \`${source_image}\` → production ${RELEASE_TAG:+and \`$RELEASE_TAG\`}" >> "$GITHUB_STEP_SUMMARY"
+          done
+        env:
+          SHA: ${{ steps.target.outputs.sha }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+
+  deploy-production:
+    name: Deploy to production
+    needs: promote
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    permissions:
+      contents: read
+      # Uncomment for keyless cloud authentication via OIDC (no long-lived cloud secrets):
+      # id-token: write
+    steps:
+      # ───────────────────────────────────────────────────────────────────────────────────────
+      # ⚠️  PLACEHOLDER: wire this to your cloud provider before relying on it.
+      #
+      # This step does NOT deploy anything yet; there is no hosting target in this project.
+      # Deploy the images tagged `production` (or, better, the immutable SHA tag
+      # ${{ needs.promote.outputs.sha }}) with the same provider step used in cd.yml's deploy-dev,
+      # pointed at the production environment and its own secrets.
+      # ───────────────────────────────────────────────────────────────────────────────────────
+      - name: Deploy (placeholder, not wired to a cloud provider)
+        run: echo "::warning::Deployment to production is not wired to a cloud provider yet. Images were promoted in GHCR; see the comments in release.yml."

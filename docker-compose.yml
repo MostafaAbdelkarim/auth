@@ -1,0 +1,87 @@
+# Full stack: docker compose up --build  ->  http://localhost:8080
+# Secrets come from a root .env file (see .env.example); compose refuses to start without them.
+x-hardening: &hardening
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?Set MONGO_ROOT_PASSWORD in .env (see .env.example)}
+      MONGO_APP_DATABASE: easygenerator-auth
+      MONGO_APP_USERNAME: app
+      MONGO_APP_PASSWORD: ${MONGO_APP_PASSWORD:?Set MONGO_APP_PASSWORD in .env (see .env.example)}
+    # Published on the loopback interface only, for `npm run dev` on this machine.
+    ports:
+      - '127.0.0.1:27017:27017'
+    volumes:
+      - mongo-auth-data:/data/db
+      - ./docker/mongo/init-app-user.js:/docker-entrypoint-initdb.d/init-app-user.js:ro
+    healthcheck:
+      test: ['CMD', 'mongosh', '--quiet', '--eval', 'db.adminCommand("ping").ok']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    <<: *hardening
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    read_only: true
+    environment:
+      MONGO_URI: mongodb://app:${MONGO_APP_PASSWORD}@mongo:27017/easygenerator-auth?authSource=easygenerator-auth
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:?Set JWT_ACCESS_SECRET in .env (see .env.example)}
+      TRUST_PROXY: 'true'
+      # This local stack serves plain http on localhost, so Secure cookies would never be sent.
+      # Behind HTTPS in a real deployment set COOKIE_SECURE=true and drop ALLOW_INSECURE_COOKIES.
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      ALLOW_INSECURE_COOKIES: ${ALLOW_INSECURE_COOKIES:-true}
+      # API docs on by default, behind Basic auth (credentials from .env, created by `make setup`).
+      SWAGGER_ENABLED: ${SWAGGER_ENABLED:-true}
+      SWAGGER_USERNAME: ${SWAGGER_USERNAME:-docs}
+      SWAGGER_PASSWORD: ${SWAGGER_PASSWORD:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Logs go to stdout (docker logs) and to daily files in the api-logs volume:
+      #   /var/log/auth-api/2026/01/2026-01-15.log
+      LOG_DIR: /var/log/auth-api
+    volumes:
+      - api-logs:/var/log/auth-api
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    depends_on:
+      mongo:
+        condition: service_healthy
+
+  web:
+    <<: *hardening
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    ports:
+      - '8080:8080'
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  mongo-auth-data:
+  api-logs:
