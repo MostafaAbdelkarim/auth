@@ -1,0 +1,29 @@
+# deps / build
+node_modules/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+
+# env
+.env
+.env.*
+!.env.example
+
+# local AI tooling (kept out of the public repo)
+.claude/
+CLAUDE.md
+
+# misc
+.DS_Store
+*.log
+logs/
+.vscode/
+.idea/
+
+# assessment brief (marked Internal) and the local plan (mentions private tooling)
+Full_Stack_Test_Task.pdf
+docs/PLAN.md
+
+# local guide for rebuilding git history (not part of the repo)
+docs/COMMIT_HISTORY_GUIDE.md
