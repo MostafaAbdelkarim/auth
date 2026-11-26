@@ -1,0 +1,2 @@
+# Conventional Commits: type(scope): summary (see commitlint.config.mjs).
+npx --no -- commitlint --edit "$1"
